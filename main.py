@@ -72,7 +72,8 @@ def discover_delete_images(regionname):
     describe_repo_paginator = ecr_client.get_paginator('describe_repositories')
     for response_listrepopaginator in describe_repo_paginator.paginate():
         for repo in response_listrepopaginator['repositories']:
-            repositories.append(repo)
+            if os.environ.get('REPO') == "None" or repo['repositoryName'] == os.environ.get('REPO'):
+                repositories.append(repo)
 
     running_containers = []
     for cluster in clusters:
@@ -189,8 +190,14 @@ if __name__ == '__main__':
                         dest='imagestokeep')
     PARSER.add_argument('-region', help='ECR/ECS region', default=None, action='store', dest='region')
     PARSER.add_argument('-ignoretagsregex', help='Regex of tag names to ignore', default="^$", action='store', dest='ignoretagsregex')
+    PARSER.add_argument('-repository', help='Name of the repository', default=None, action='store', dest='repo')
 
     ARGS = PARSER.parse_args()
+    if ARGS.repo:
+        os.environ["REPO"] = ARGS.repo
+    else:
+        os.environ["REPO"] = "None"
+
     if ARGS.region:
         os.environ["REGION"] = ARGS.region
     else:
