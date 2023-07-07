@@ -1,0 +1,14 @@
+__pycache__
+.idea
+bin
+boto3*
+botocore*
+concurrent
+dateutil
+docutils*
+futures-*.dist-info
+jmespath*
+python_dateutil-*.dist-info
+s3transfer*
+six*
+urllib3*
