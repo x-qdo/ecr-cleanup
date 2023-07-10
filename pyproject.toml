@@ -1,0 +1,17 @@
+[tool.poetry]
+name = "ecr-cleanup"
+version = "0.1.0"
+description = ""
+authors = ["Vladimir Kuznichenkov <vova@qdo.ee>"]
+readme = "README.md"
+packages = []
+
+[tool.poetry.dependencies]
+python = "^3.9"
+boto3 = "^1.28.1"
+kubernetes = "^26.1.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

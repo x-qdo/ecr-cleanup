@@ -11,19 +11,20 @@ CONDITIONS OF ANY KIND, either express or implied. See the License for the speci
 limitations under the License.
 '''
 
-from __future__ import print_function
-
 import argparse
 import os
 import re
+from datetime import timedelta, datetime
+
 import boto3
 from kubernetes import config, client
 
 REGION = None
 DRYRUN = None
-IMAGES_TO_KEEP = None
+IMAGES_TO_KEEP = 300
+IMAGES_KEEP_DURATION = "3m"
 IGNORE_TAGS_REGEX = None
-CLUSTERS = None
+CLUSTERS = []
 
 
 def initialize():
@@ -32,9 +33,11 @@ def initialize():
     global IMAGES_TO_KEEP
     global IGNORE_TAGS_REGEX
     global CLUSTERS
+    global IMAGES_KEEP_DURATION
 
     REGION = os.environ.get('REGION', "None")
     DRYRUN = os.environ.get('DRYRUN', "false").lower()
+    IMAGES_KEEP_DURATION = os.environ.get('IMAGES_KEEP_DURATION', "3m")
     CLUSTERS = os.environ.get('CLUSTERS', "None").split(",")
     if DRYRUN == "false":
         DRYRUN = False
@@ -43,15 +46,29 @@ def initialize():
     IMAGES_TO_KEEP = int(os.environ.get('IMAGES_TO_KEEP', 100))
     IGNORE_TAGS_REGEX = os.environ.get('IGNORE_TAGS_REGEX', "^$")
 
+
 def handler(event, context):
     initialize()
     if REGION == "None":
         ec2_client = boto3.client('ec2')
         available_regions = ec2_client.describe_regions()['Regions']
         for region in available_regions:
-            discover_delete_images(region['RegionName'])
+            discover_delete_images(region['RegionName'], CLUSTERS)
     else:
-        discover_delete_images(REGION)
+        discover_delete_images(REGION, CLUSTERS)
+
+
+def convert_duration_to_timedelta(duration_str):
+    number = int(re.search(r'\d+', duration_str).group())
+    if 'd' in duration_str:
+        return timedelta(days=number)
+    elif 'w' in duration_str:
+        return timedelta(weeks=number)
+    elif 'm' in duration_str:
+        return timedelta(days=number * 30)
+    else:
+        raise ValueError(f'Invalid duration string: {duration_str}')
+
 
 def get_eks_pods_images(cluster):
     config.load_kube_config(context=cluster)
@@ -61,12 +78,14 @@ def get_eks_pods_images(cluster):
     for pod in pods:
         for container in pod.spec.containers:
             if container.image not in running_images:
-                running_images.append(container. image)
+                running_images.append(container.image)
     return running_images
 
-def discover_delete_images(regionname):
-    print("Discovering images in " + regionname)
-    ecr_client = boto3.client('ecr', region_name=regionname)
+
+def discover_delete_images(region_name, clusters):
+    global time_limit
+    print("Discovering images in " + region_name)
+    ecr_client = boto3.client('ecr', region_name=region_name)
 
     repositories = []
     describe_repo_paginator = ecr_client.get_paginator('describe_repositories')
@@ -76,6 +95,7 @@ def discover_delete_images(regionname):
 
     running_containers = []
     for cluster in clusters:
+        print(f'Discovering running pods in {cluster}')
         running_containers.extend(get_eks_pods_images(cluster))
 
     print("Images that are running:")
@@ -89,11 +109,11 @@ def discover_delete_images(regionname):
         deletetag = []
         tagged_images = []
 
-        describeimage_paginator = ecr_client.get_paginator('describe_images')
-        for response_describeimagepaginator in describeimage_paginator.paginate(
+        describe_image_paginator = ecr_client.get_paginator('describe_images')
+        for response_describe_image_paginator in describe_image_paginator.paginate(
                 registryId=repository['registryId'],
                 repositoryName=repository['repositoryName']):
-            for image in response_describeimagepaginator['imageDetails']:
+            for image in response_describe_image_paginator['imageDetails']:
                 if 'imageTags' in image:
                     tagged_images.append(image)
                 else:
@@ -105,22 +125,32 @@ def discover_delete_images(regionname):
         tagged_images.sort(key=lambda k: k['imagePushedAt'], reverse=True)
 
         # Get ImageDigest from ImageURL for running images. Do this for every repository
+        # Converting running_containers to set for efficient lookup
+        running_containers_set = set(running_containers)
+
         running_sha = []
+
+        # Calculate abs point to check how old images are
+        keep_duration = convert_duration_to_timedelta(IMAGES_KEEP_DURATION)
+
         for image in tagged_images:
+            time_limit = datetime.now(tz=image['imagePushedAt'].tzinfo) - keep_duration
             for tag in image['imageTags']:
                 imageurl = repository['repositoryUri'] + ":" + tag
-                for runningimages in running_containers:
-                    if imageurl == runningimages:
-                        if imageurl not in running_sha:
-                            running_sha.append(image['imageDigest'])
+                if imageurl in running_containers_set:  # This is a constant time operation
+                    running_sha.append(image['imageDigest'])
+
+        # Remove duplicates in running_sha
+        running_sha_set = set(running_sha)
 
         print("Number of running images found {}".format(len(running_sha)))
         ignore_tags_regex = re.compile(IGNORE_TAGS_REGEX)
-        for image in tagged_images:
-            if tagged_images.index(image) >= IMAGES_TO_KEEP:
+
+        for index, image in enumerate(tagged_images):
+            if image['imagePushedAt'] < time_limit or index >= IMAGES_TO_KEEP:
                 for tag in image['imageTags']:
                     if "latest" not in tag and ignore_tags_regex.search(tag) is None:
-                        if not running_sha or image['imageDigest'] not in running_sha:
+                        if not running_sha_set or image['imageDigest'] not in running_sha_set:
                             append_to_list(deletesha, image['imageDigest'])
                             append_to_tag_list(deletetag, {"imageUrl": repository['repositoryUri'] + ":" + tag,
                                                            "pushedAt": image["imagePushedAt"]})
@@ -183,12 +213,16 @@ def delete_images(ecr_client, deletesha, deletetag, repo_id, name):
 if __name__ == '__main__':
     REQUEST = {"None": "None"}
     PARSER = argparse.ArgumentParser(description='Deletes stale ECR images')
-    PARSER.add_argument('-dryrun', help='Prints the repository to be deleted without deleting them', default='true',
+    PARSER.add_argument('--dryrun', help='Prints the repository to be deleted without deleting them', default='true',
                         action='store', dest='dryrun')
-    PARSER.add_argument('-imagestokeep', help='Number of image tags to keep', default='100', action='store',
+    PARSER.add_argument('-i', '--imagestokeep', help='Number of image tags to keep', default='100', action='store',
                         dest='imagestokeep')
-    PARSER.add_argument('-region', help='ECR/ECS region', default=None, action='store', dest='region')
-    PARSER.add_argument('-ignoretagsregex', help='Regex of tag names to ignore', default="^$", action='store', dest='ignoretagsregex')
+    PARSER.add_argument('-d', '--imagestokeepduration', help='Duration from last push', default='3m', action='store',
+                        dest='imagestokeepduration')
+    PARSER.add_argument('-r', '--region', help='ECR/ECS region', action='store', dest='region', required=True)
+    PARSER.add_argument('-re', '--ignoretagsregex', help='Regex of tag names to ignore', default="^$", action='store',
+                        dest='ignoretagsregex')
+    PARSER.add_argument('-c', '--cluster', nargs='+', help='<Required> Add context to parse', required=True)
 
     ARGS = PARSER.parse_args()
     if ARGS.region:
@@ -198,4 +232,6 @@ if __name__ == '__main__':
     os.environ["DRYRUN"] = ARGS.dryrun.lower()
     os.environ["IMAGES_TO_KEEP"] = ARGS.imagestokeep
     os.environ["IGNORE_TAGS_REGEX"] = ARGS.ignoretagsregex
+    os.environ["IMAGES_KEEP_DURATION"] = ARGS.imagestokeepduration
+    os.environ["CLUSTERS"] = ','.join(ARGS.cluster)
     handler(REQUEST, None)
