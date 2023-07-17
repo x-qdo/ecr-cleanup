@@ -24,6 +24,7 @@ DRYRUN = None
 IMAGES_TO_KEEP = 300
 IMAGES_KEEP_DURATION = "3m"
 IGNORE_TAGS_REGEX = None
+IGNORE_REPO_REGEX = None
 CLUSTERS = []
 
 
@@ -32,6 +33,7 @@ def initialize():
     global DRYRUN
     global IMAGES_TO_KEEP
     global IGNORE_TAGS_REGEX
+    global IGNORE_REPO_REGEX
     global CLUSTERS
     global IMAGES_KEEP_DURATION
 
@@ -45,6 +47,7 @@ def initialize():
         DRYRUN = True
     IMAGES_TO_KEEP = int(os.environ.get('IMAGES_TO_KEEP', 100))
     IGNORE_TAGS_REGEX = os.environ.get('IGNORE_TAGS_REGEX', "^$")
+    IGNORE_REPO_REGEX = os.environ.get('IGNORE_REPO_REGEX', "^$")
 
 
 def handler(event, context):
@@ -102,12 +105,20 @@ def discover_delete_images(region_name, clusters):
     for image in running_containers:
         print(image)
 
+    ignore_repo_regex = re.compile(IGNORE_REPO_REGEX)
+
     for repository in repositories:
+        if re.search(ignore_repo_regex, repository['repositoryUri']):
+            print("------------------------")
+            print("Skipping repository: " + repository['repositoryUri'])
+            continue
+
         print("------------------------")
-        print("Starting with repository :" + repository['repositoryUri'])
+        print("Starting with repository: " + repository['repositoryUri'])
         deletesha = []
         deletetag = []
         tagged_images = []
+
 
         describe_image_paginator = ecr_client.get_paginator('describe_images')
         for response_describe_image_paginator in describe_image_paginator.paginate(
@@ -150,10 +161,12 @@ def discover_delete_images(region_name, clusters):
             if image['imagePushedAt'] < time_limit or index >= IMAGES_TO_KEEP:
                 for tag in image['imageTags']:
                     if "latest" not in tag and ignore_tags_regex.search(tag) is None:
+                        # Add a condition to exclude repo that contain the name regex
                         if not running_sha_set or image['imageDigest'] not in running_sha_set:
                             append_to_list(deletesha, image['imageDigest'])
                             append_to_tag_list(deletetag, {"imageUrl": repository['repositoryUri'] + ":" + tag,
                                                            "pushedAt": image["imagePushedAt"]})
+
         if deletesha:
             print("Number of images to be deleted: {}".format(len(deletesha)))
             delete_images(
@@ -223,6 +236,8 @@ if __name__ == '__main__':
     PARSER.add_argument('-re', '--ignoretagsregex', help='Regex of tag names to ignore', default="^$", action='store',
                         dest='ignoretagsregex')
     PARSER.add_argument('-c', '--cluster', nargs='+', help='<Required> Add context to parse', required=True)
+    PARSER.add_argument('-ir', '--ignorereporegex', help='Regex of repo names to ignore', default="^$", action='store',
+                            dest='ignorereporegex')
 
     ARGS = PARSER.parse_args()
     if ARGS.region:
@@ -232,6 +247,7 @@ if __name__ == '__main__':
     os.environ["DRYRUN"] = ARGS.dryrun.lower()
     os.environ["IMAGES_TO_KEEP"] = ARGS.imagestokeep
     os.environ["IGNORE_TAGS_REGEX"] = ARGS.ignoretagsregex
+    os.environ["IGNORE_REPO_REGEX"] = ARGS.ignorereporegex
     os.environ["IMAGES_KEEP_DURATION"] = ARGS.imagestokeepduration
     os.environ["CLUSTERS"] = ','.join(ARGS.cluster)
     handler(REQUEST, None)
