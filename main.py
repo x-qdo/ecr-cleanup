@@ -119,7 +119,6 @@ def discover_delete_images(region_name, clusters):
         deletetag = []
         tagged_images = []
 
-
         describe_image_paginator = ecr_client.get_paginator('describe_images')
         for response_describe_image_paginator in describe_image_paginator.paginate(
                 registryId=repository['registryId'],
@@ -158,14 +157,26 @@ def discover_delete_images(region_name, clusters):
         ignore_tags_regex = re.compile(IGNORE_TAGS_REGEX)
 
         for index, image in enumerate(tagged_images):
-            if image['imagePushedAt'] < time_limit or index >= IMAGES_TO_KEEP:
+            # lastRecordedPullTime is present only for active images.
+            last_activity_time = image.get('lastRecordedPullTime')
+
+            eligible_for_deletion = False
+            # stale image, we will decide based on number or push time
+            if last_activity_time is None:
+                if image['imagePushedAt'] < time_limit or index >= IMAGES_TO_KEEP:
+                    eligible_for_deletion = True
+            # active image, only by last pull
+            elif last_activity_time < time_limit:
+                eligible_for_deletion = True
+
+            if eligible_for_deletion:
                 for tag in image['imageTags']:
                     if "latest" not in tag and ignore_tags_regex.search(tag) is None:
-                        # Add a condition to exclude repo that contain the name regex
                         if not running_sha_set or image['imageDigest'] not in running_sha_set:
                             append_to_list(deletesha, image['imageDigest'])
                             append_to_tag_list(deletetag, {"imageUrl": repository['repositoryUri'] + ":" + tag,
-                                                           "pushedAt": image["imagePushedAt"]})
+                                                           "pushedAt": image["imagePushedAt"],
+                                                           "pulledAt": image.get('lastRecordedPullTime')})
 
         if deletesha:
             print("Number of images to be deleted: {}".format(len(deletesha)))
@@ -219,7 +230,7 @@ def delete_images(ecr_client, deletesha, deletetag, repo_id, name):
     if deletetag:
         print("Image URLs that are marked for deletion:")
         for ids in deletetag:
-            print("- {} - {}".format(ids["imageUrl"], ids["pushedAt"]))
+            print("- {} - {} - {}".format(ids["imageUrl"], ids["pushedAt"], ids["pulledAt"]))
 
 
 # Below is the test harness
@@ -237,7 +248,7 @@ if __name__ == '__main__':
                         dest='ignoretagsregex')
     PARSER.add_argument('-c', '--cluster', nargs='+', help='<Required> Add context to parse', required=True)
     PARSER.add_argument('-ir', '--ignorereporegex', help='Regex of repo names to ignore', default="^$", action='store',
-                            dest='ignorereporegex')
+                        dest='ignorereporegex')
 
     ARGS = PARSER.parse_args()
     if ARGS.region:
